@@ -278,8 +278,22 @@ if not df.empty:
         if not expense_df.empty:
             morandi_colors = ['#8B9DA3', '#D5C7BC', '#A8A39D', '#C0C5C1', '#D4CFC9']
             
+
+            chart_df = expense_df.copy()
+            chart_display_map = {
+                "飲食": "飲食 Food", "Food": "飲食 Food",
+                "生活": "生活 Living", "Living": "生活 Living",
+                "交通": "交通 Transport", "Transport": "交通 Transport",
+                "購物": "購物 Shopping", "Shopping": "購物 Shopping",
+                "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
+                "投資": "投資 Investment", "Investment": "投資 Investment",
+                "學習": "學習 Learning", "Learning": "學習 Learning"
+            }
+            chart_df['category'] = chart_df['category'].replace(chart_display_map)
+
+
             fig_pie = px.pie(
-                expense_df, 
+                chart_df, 
                 values='amount_original', 
                 names='category', 
                 hole=0.4, 
@@ -367,15 +381,76 @@ if not df.empty:
     styled_df.columns = ['ID 編號', 'Date 日期', 'Item 品項', 'Category 分類', 'Amount 金額', 'Currency 幣別']
 
     
+    display_map = {
+        "飲食": "飲食 Food", "Food": "飲食 Food",
+        "生活": "生活 Living", "Living": "生活 Living",
+        "交通": "交通 Transport", "Transport": "交通 Transport",
+        "購物": "購物 Shopping", "Shopping": "購物 Shopping",
+        "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
+        "投資": "投資 Investment", "Investment": "投資 Investment",
+        "學習": "學習 Learning", "Learning": "學習 Learning",
+        "收入": "收入 Income", "Income": "收入 Income",
+        "轉帳": "轉帳 Transfer", "Transfer": "轉帳 Transfer"
+    }
+    styled_df['Category 分類'] = styled_df['Category 分類'].replace(display_map)
+
+    # 金額小數點處理 (你原本的邏輯)
     styled_df['Amount 金額'] = styled_df['Amount 金額'].apply(
         lambda x: int(x) if x % 1 == 0 else round(x, 2)
     )
+    
+    # 確保日期格式為 datetime 以便篩選
+    styled_df['Date 日期'] = pd.to_datetime(styled_df['Date 日期']).dt.date
+
+    # 👇 4. 新增：日期篩選器 (Date Filter)
+    col_filter, _ = st.columns([1, 1])
+    with col_filter:
+        today = datetime.date.today()
+        first_day_of_month = today.replace(day=1)
+        date_range = st.date_input(
+            "📅 篩選日期範圍 (Select Date Range)：", 
+            value=(first_day_of_month, today)
+        )
+
+    # 執行日期篩選邏輯
+    if len(date_range) == 2:
+        mask = (styled_df['Date 日期'] >= date_range[0]) & (styled_df['Date 日期'] <= date_range[1])
+        styled_df = styled_df.loc[mask]
+    elif len(date_range) == 1:
+        mask = (styled_df['Date 日期'] >= date_range[0])
+        styled_df = styled_df.loc[mask]
+
+    
+
+
+    styled_df['Amount 金額'] = styled_df['Amount 金額'].apply(
+        lambda x: int(x) if x % 1 == 0 else round(x, 2)
+    )
+
+    # 👇 新增：計算篩選區間的總花費
+    total_filtered_amount = styled_df['Amount 金額'].sum()
+    
+    # 取得目前的幣別字串 (如果表格有資料的話)
+    current_currency = styled_df['Currency 幣別'].iloc[0] if not styled_df.empty else ""
+
+    # 👇 升級排版：利用 columns 將「筆數」放左邊，「總花費」放右邊
+    info_col1, info_col2 = st.columns([1, 1])
+    with info_col1:
+        st.caption(f"Showing {len(styled_df)} records | 共顯示 {len(styled_df)} 筆紀錄")
+    with info_col2:
+        # 使用 HTML/Markdown 讓金額靠右對齊，並用稍微醒目的顏色標示
+        st.markdown(
+            f"<div style='text-align: right;'>"
+            f"<b>💰 區間總計 (Total)：<span style='color: #A0522D; font-size: 1.1em;'>{total_filtered_amount:,.2f} {current_currency}</span></b>"
+            f"</div>", 
+            unsafe_allow_html=True
+        )
 
     
     def apply_morandi_table_style(styler):
         # 1. set the base style for the entire table (light beige background with soft gray-brown text)
         styler.set_properties(**{
-            'background-color': '#ECDFD5',  
+            'background-color': "#F5EEE5",  
             'color': '#4A4643',             
             'border-bottom': '1px solid #E8E4D9' 
         })
