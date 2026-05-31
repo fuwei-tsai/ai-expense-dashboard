@@ -34,6 +34,14 @@ def get_db_connection():
         cursorclass=pymysql.cursors.DictCursor 
     )
 
+EXCHANGE_RATES = {
+    'TWD': 1.0,      
+    'CAD': 23.5,     # 1 CAD ≈ 23.5 TWD
+    'EUR': 34.8,     # 1 EUR ≈ 34.8 TWD
+    'USD': 32.2,     # 1 USD ≈ 32.2 TWD
+    'JPY': 0.21      # 1 JPY ≈ 0.21 TWD
+}
+
 
 @st.cache_data(ttl=5)
 def load_data():
@@ -114,75 +122,83 @@ def save_budget_to_db(currency, amount):
 ## --- 3. conduct data reading and cleaning ---
 df = load_data()
 
-
-
 if not df.empty:
     df['amount_original'] = pd.to_numeric(df['amount_original'], errors='coerce').fillna(0)
-
 
     # --- filter currency ---
     st.markdown("### 💱 Currency Selection | 選擇顯示幣別")
     available_currencies = df['currency'].unique().tolist()
-    default_idx = available_currencies.index('CAD') if 'CAD' in available_currencies else 0
-    selected_currency = st.radio("Current Currency | 目前結算幣別：", available_currencies, index=default_idx, horizontal=True)
-    st.markdown("---")
-    filtered_df = df[df['currency'] == selected_currency]
+    
+   
+    display_options = available_currencies + ['ALL (TWD Equivalent)']
+    default_idx = display_options.index('CAD') if 'CAD' in display_options else 0
+    selected_option = st.radio("Current Currency | 目前結算幣別：", display_options, index=default_idx, horizontal=True)
+    
 
+    
+    is_all_currency = (selected_option == 'ALL (TWD Equivalent)')
+    display_currency_symbol = 'TWD' if is_all_currency else selected_option
+
+    if is_all_currency:
+        rates_text = " ｜ ".join([f"1 {curr} = {rate} TWD" for curr, rate in EXCHANGE_RATES.items() if curr != 'TWD'])
+        st.info(f"💡 **基準匯率 (Reference Rates)：** {rates_text}")
+        
+    st.markdown("---")
+
+    
+    if is_all_currency:
+        filtered_df = df.copy()
+        def convert_to_twd(row):
+            rate = EXCHANGE_RATES.get(row['currency'], 1.0)
+            return row['amount_original'] * rate
+        
+        filtered_df['amount_original'] = filtered_df.apply(convert_to_twd, axis=1)
+        filtered_df['currency'] = 'TWD'
+        selected_currency = 'TWD_ALL'
+    else:
+        filtered_df = df[df['currency'] == selected_option].copy()
+        selected_currency = selected_option
 
     # 1. empty state handling
     if 'budgets' not in st.session_state:
         st.session_state.budgets = {}
 
-
-
-    # 2. switch case: if the selected currency doesn't have a budget in session state, initialize it with a default value (
+    # 2. switch case: 
     if selected_currency not in st.session_state.budgets:
-        if selected_currency == 'TWD':
+        if selected_currency in ['TWD', 'TWD_ALL']:
             st.session_state.budgets[selected_currency] = 30000.0 
-
         else:
             st.session_state.budgets[selected_currency] = 2000.0  
 
-
-
-
+    # --- Sidebar Setup ---
     with st.sidebar:
         st.header("⚙️ Settings | 設定與除錯")
         st.markdown("### 🎯 Budget Setup | 預算設定")
 
-       
         db_budget = get_budget_from_db(selected_currency)
-
 
         with st.form(key=f'budget_form_{selected_currency}'):
             new_budget = st.number_input(
-                f"Set {selected_currency} Budget | 設定本月預算：",
+                f"Set {display_currency_symbol} Budget | 設定本月預算：",
                 min_value=0.0,
                 value=db_budget,  
                 step=100.0
-
             )
 
             submit_budget = st.form_submit_button(label="Save | 確定並儲存")
 
-           
-
             if submit_budget:
-
                 save_budget_to_db(selected_currency, new_budget)
-                st.success(f"✅{selected_currency} Budget Saved! 預算已儲存！")
+                st.success(f"✅ {display_currency_symbol} Budget Saved! 預算已儲存！")
                 st.rerun()
 
-       
         monthly_budget = get_budget_from_db(selected_currency)
-
 
         st.write("---")
 
         if st.button("🔄 Refresh Data | 手動更新資料"):
             st.cache_data.clear()
             st.rerun()
-
 
 
 
@@ -205,18 +221,17 @@ if not df.empty:
 
     col1, col2, col3, col4 = st.columns(4)
 
-    with col1:
-        st.metric(f"Total Expense | 總支出 ({selected_currency})", f"{total_exp:,.2f}", delta_color="inverse")
+    with col1: 
+        st.metric(f"Total Expense | 總支出 ({display_currency_symbol})", f"{total_exp:,.2f}", delta_color="inverse")
 
     with col2:
-        st.metric(f"Total Income | 總收入 ({selected_currency})", f"{total_inc:,.2f}")
+        st.metric(f"Total Income | 總收入 ({display_currency_symbol})", f"{total_inc:,.2f}")
 
     with col3:
-        st.metric(f"Transfer Flow | 換匯流動 ({selected_currency})", f"{transfer_net:,.2f}", delta_color="normal")
+        st.metric(f"Transfer Flow | 換匯流動 ({display_currency_symbol})", f"{transfer_net:,.2f}", delta_color="normal")
 
     with col4:
-        st.metric(f"Net Cash Flow | 本月淨流向 ({selected_currency})", f"{net_income:,.2f}", delta=f"{net_income:,.2f}")
-
+        st.metric(f"Net Cash Flow | 本月淨流向 ({display_currency_symbol})", f"{net_income:,.2f}", delta=f"{net_income:,.2f}")
 
 
     st.markdown("---")
@@ -342,7 +357,7 @@ if not df.empty:
                     name="Cumulative Amount | 累積總額",
                     mode='lines+markers',
                     line=dict(color='#6B655F', width=3), 
-                    marker=dict(size=8, color='#F4F1ED', line=dict(width=2, color='#6B655F')) 
+                    marker=dict(size=8, color='#F4F1ED', line=dict(width=1, color='#6B655F')) 
                 ),
                 secondary_y=True,
             )
@@ -394,15 +409,15 @@ if not df.empty:
     }
     styled_df['Category 分類'] = styled_df['Category 分類'].replace(display_map)
 
-    # 金額小數點處理 (你原本的邏輯)
-    styled_df['Amount 金額'] = styled_df['Amount 金額'].apply(
-        lambda x: int(x) if x % 1 == 0 else round(x, 2)
-    )
     
-    # 確保日期格式為 datetime 以便篩選
+    styled_df['Amount 金額'] = pd.to_numeric(styled_df['Amount 金額'], errors='coerce').fillna(0)
+
+    
     styled_df['Date 日期'] = pd.to_datetime(styled_df['Date 日期']).dt.date
 
-    # 👇 4. 新增：日期篩選器 (Date Filter)
+
+
+    # Date Filter
     col_filter, _ = st.columns([1, 1])
     with col_filter:
         today = datetime.date.today()
@@ -412,7 +427,6 @@ if not df.empty:
             value=(first_day_of_month, today)
         )
 
-    # 執行日期篩選邏輯
     if len(date_range) == 2:
         mask = (styled_df['Date 日期'] >= date_range[0]) & (styled_df['Date 日期'] <= date_range[1])
         styled_df = styled_df.loc[mask]
@@ -421,27 +435,25 @@ if not df.empty:
         styled_df = styled_df.loc[mask]
 
     
-
+    if not styled_df.empty:
+        totals_by_currency = styled_df.groupby('Currency 幣別')['Amount 金額'].sum()
+        total_strings = [f"<span style='color: #A0522D; font-size: 1.1em;'>{amt:,.2f} {curr}</span>" for curr, amt in totals_by_currency.items()]
+        total_display_text = " ｜ ".join(total_strings)
+    else:
+        total_display_text = "<span style='color: #A0522D; font-size: 1.1em;'>0.00</span>"
 
     styled_df['Amount 金額'] = styled_df['Amount 金額'].apply(
-        lambda x: int(x) if x % 1 == 0 else round(x, 2)
+        lambda x: f"{x:,.4f}".rstrip('0').rstrip('.') if pd.notnull(x) else "0"
     )
 
-    # 👇 新增：計算篩選區間的總花費
-    total_filtered_amount = styled_df['Amount 金額'].sum()
     
-    # 取得目前的幣別字串 (如果表格有資料的話)
-    current_currency = styled_df['Currency 幣別'].iloc[0] if not styled_df.empty else ""
-
-    # 👇 升級排版：利用 columns 將「筆數」放左邊，「總花費」放右邊
     info_col1, info_col2 = st.columns([1, 1])
     with info_col1:
         st.caption(f"Showing {len(styled_df)} records | 共顯示 {len(styled_df)} 筆紀錄")
     with info_col2:
-        # 使用 HTML/Markdown 讓金額靠右對齊，並用稍微醒目的顏色標示
         st.markdown(
             f"<div style='text-align: right;'>"
-            f"<b>💰 區間總計 (Total)：<span style='color: #A0522D; font-size: 1.1em;'>{total_filtered_amount:,.2f} {current_currency}</span></b>"
+            f"<b>💰 區間總計 (Total)：{total_display_text}</b>"
             f"</div>", 
             unsafe_allow_html=True
         )
@@ -460,7 +472,7 @@ if not df.empty:
             {
                 'selector': 'th',  
                 'props': [
-                    ('background-color', '#B3C6C9'), 
+                    ('background-color', "#C4D6D9"), 
                     ('color', '#4A4643'),            
                     ('font-weight', 'bold'),         
                     ('border-bottom', '1px solid #8B9DA3') 
@@ -477,3 +489,5 @@ if not df.empty:
 else:
     st.info("👋 歡迎！目前資料庫是空的。請在 LINE 機器人輸入第一筆帳務（例如：今天晚餐 20 加幣）後重新整理此頁面。")
     st.info("👀 Welcome! The database is currently empty. Please input your first transaction through the LINE bot (e.g., 'Spent 20 Canadian Dollars for dinner today') and refresh this page.")
+
+
