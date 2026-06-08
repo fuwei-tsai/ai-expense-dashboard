@@ -219,13 +219,13 @@ if not df.empty:
 
         monthly_budget = get_budget_from_db(selected_currency)
 
-        st.write("---")
+        
 
         if st.button("🔄 Refresh Data | 手動更新資料"):
             st.cache_data.clear()
             st.rerun()
 
-
+        st.write("---")
 
 
            
@@ -423,7 +423,7 @@ if not df.empty:
             else:
                 st.success(f"✅ {query_date_str} 當天無重複交易 No duplicate transactions detected for this date.")
 
-
+    st.write("---")
 
 
     # prediction and insights section
@@ -584,6 +584,21 @@ if not df.empty:
     styled_df.columns = ['ID 編號', 'Date 日期', 'Item 品項', 'Category 分類', 'Amount 金額', 'Currency 幣別']
 
 
+    display_map = {
+        "飲食": "飲食 Food", "Food": "飲食 Food",
+        "生活": "生活 Living", "Living": "生活 Living",
+        "交通": "交通 Transport", "Transport": "交通 Transport",
+        "購物": "購物 Shopping", "Shopping": "購物 Shopping",
+        "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
+        "投資": "投資 Investment", "Investment": "投資 Investment",
+        "學習": "學習 Learning", "Learning": "學習 Learning",
+        "收入": "收入 Income", "Income": "收入 Income",
+        "轉帳": "轉帳 Transfer", "Transfer": "轉帳 Transfer"
+    }
+    styled_df['Category 分類'] = styled_df['Category 分類'].replace(display_map)
+    styled_df['Amount 金額'] = pd.to_numeric(styled_df['Amount 金額'], errors='coerce').fillna(0)
+    styled_df['Date 日期'] = pd.to_datetime(styled_df['Date 日期']).dt.date
+
     # Date Filter
     col_filter, _ = st.columns([1, 1])
     with col_filter:
@@ -632,7 +647,142 @@ if not df.empty:
     st.table(styled_df.style.pipe(apply_morandi_table_style).hide(axis="index"))
 
 
+    # === Manual Transaction Management ===
+    st.markdown("---")
+    st.subheader("✍️ Manual Transaction Management | 手動帳務管理")
 
+    with st.expander("➕ 新增 / ✏️ 編輯 / 🗑️ 刪除 (Expand to Add, Edit, or Delete)"):
+        tab_add, tab_edit, tab_delete = st.tabs(["➕ 新增 (Add)", "✏️ 編輯 (Edit)", "🗑️ 刪除 (Delete)"])
+
+        # defined category and currency options for manual entry (can be expanded later)
+        cat_options = ["飲食 Food", "生活 Living", "交通 Transport", "購物 Shopping", "娛樂 Entertainment", "投資 Investment", "學習 Learning", "收入 Income", "轉帳 Transfer"]
+        curr_options = ['EUR', 'CAD', 'TWD', 'USD', 'JPY']
+
+        # define a helper function to execute manual SQL queries for add/edit/delete operations with error handling
+        def execute_manual_query(sql, vals):
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, vals)
+                conn.commit()
+                conn.close()
+                return True
+            except Exception as e:
+                st.error(f"資料庫操作失敗 Database error: {e}")
+                return False
+
+        # --- 1. Add function ---
+        with tab_add:
+            with st.form("manual_add_form", clear_on_submit=True):
+                col1, col2 = st.columns(2)
+                new_date = col1.date_input("日期 (Date)", datetime.date.today())
+                new_item = col2.text_input("品項 (Item)", placeholder="例如：晚餐、超市...")
+                new_cat = col1.selectbox("分類 (Category)", cat_options)
+                new_amt = col2.number_input("金額 (Amount)", min_value=0.0, step=1.0)
+                new_curr = col1.selectbox("幣別 (Currency)", curr_options)
+
+                submitted_add = st.form_submit_button("送出新增 (Submit)")
+                if submitted_add:
+                    if new_item.strip() == "":
+                        st.warning("⚠️ 請填寫品項名稱 (Item name is required)！")
+                    elif new_amt <= 0:
+                        st.warning("⚠️ 金額必須大於 0 (Amount must be > 0)！")
+                    else:
+                        target_mmdd = new_date.strftime("%m%d")
+                        try:
+                            conn = get_db_connection()
+                            with conn.cursor() as cursor:
+                                cursor.execute(
+                                    "SELECT display_id FROM test.daily_expenses WHERE display_id LIKE %s ORDER BY display_id DESC LIMIT 1", 
+                                    (f"M{target_mmdd}%",)
+                                )
+                                last_record = cursor.fetchone()
+                            conn.close()
+                            
+                            if last_record and last_record['display_id']:
+                                last_seq = int(last_record['display_id'][-2:])
+                                new_seq = last_seq + 1
+                            else:
+                                new_seq = 1
+                                
+                            
+                            manual_id = f"M{target_mmdd}{new_seq:02d}"
+                            
+                        except Exception as e:
+                            st.error(f"流水號生成失敗 ID Generation Error: {e}")
+                            manual_id = f"M{target_mmdd}99" 
+
+                        
+                        sql_insert = """
+                            INSERT INTO test.daily_expenses
+                            (display_id, transaction_date, item_description, category, amount_original, currency)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """
+                        if execute_manual_query(sql_insert, (manual_id, new_date, new_item, new_cat, new_amt, new_curr)):
+                            st.success(f"✅ 成功新增紀錄 Success: {new_item} ({new_amt} {new_curr}) | ID編號: {manual_id}")
+                            st.cache_data.clear()
+                            st.rerun()
+                        
+
+        # prepare options for edit and delete tabs based on current dataframe records
+        if not df.empty:
+            df['display_label'] = df['display_id'].astype(str) + " | " + df['transaction_date'].astype(str) + " | " + df['item_description'] + " (" + df['amount_original'].astype(str) + " " + df['currency'] + ")"
+            record_dict = dict(zip(df['display_label'], df['display_id']))
+            options_list = ["請選擇紀錄... (Select a record...)"] + list(record_dict.keys())
+        else:
+            options_list = ["尚無紀錄 (No records)"]
+            record_dict = {}
+
+        # --- 2.Edit function ---
+        with tab_edit:
+            selected_edit = st.selectbox("選擇要修改的紀錄 (Select to edit)", options_list, key="edit_select")
+            if selected_edit != "請選擇紀錄... (Select a record...)" and selected_edit != "尚無紀錄 (No records)":
+                target_id = record_dict[selected_edit]
+                target_row = df[df['display_id'] == target_id].iloc[0]
+
+                with st.form("manual_edit_form"):
+                    col1, col2 = st.columns(2)
+                    edit_date = col1.date_input("日期 (Date)", pd.to_datetime(target_row['transaction_date']))
+                    edit_item = col2.text_input("品項 (Item)", value=target_row['item_description'])
+                    
+                    # for category and currency, set the default selection to the current value of the record being edited
+                    default_cat_idx = cat_options.index(target_row['category']) if target_row['category'] in cat_options else 0
+                    edit_cat = col1.selectbox("分類 (Category)", cat_options, index=default_cat_idx)
+                    
+                    edit_amt = col2.number_input("金額 (Amount)", min_value=0.0, value=float(target_row['amount_original']), step=1.0)
+                    
+                    default_curr_idx = curr_options.index(target_row['currency']) if target_row['currency'] in curr_options else 0
+                    edit_curr = col1.selectbox("幣別 (Currency)", curr_options, index=default_curr_idx)
+
+                    submitted_edit = st.form_submit_button("儲存修改 (Save Changes)")
+                    if submitted_edit:
+                        if edit_item.strip() == "":
+                            st.warning("⚠️ 請填寫品項名稱！fill in the item name!")
+                        else:
+                            sql_update = """
+                                UPDATE test.daily_expenses
+                                SET transaction_date=%s, item_description=%s, category=%s, amount_original=%s, currency=%s
+                                WHERE display_id=%s
+                            """
+                            if execute_manual_query(sql_update, (edit_date, edit_item, edit_cat, edit_amt, edit_curr, target_id)):
+                                st.success("✅ 修改成功！Edit successful!")
+                                st.cache_data.clear()
+                                st.rerun()
+
+        # --- 3. Delete function ---
+        with tab_delete:
+            selected_del = st.selectbox("選擇要刪除的紀錄 (Select to delete)", options_list, key="delete_select")
+            if selected_del != "請選擇紀錄... (Select a record...)" and selected_del != "尚無紀錄 (No records)":
+                target_id_del = record_dict[selected_del]
+                st.error(f"⚠️ 確定要永久刪除此紀錄嗎？Delete this record permanently?\n\n**{selected_del}**")
+                
+                if st.button("🚨 確認刪除 (Confirm Delete)", type="primary"):
+                    sql_delete = "DELETE FROM test.daily_expenses WHERE display_id=%s"
+                    if execute_manual_query(sql_delete, (target_id_del,)):
+                        st.success("✅ 刪除成功！Delete successful!")
+                        st.cache_data.clear()
+                        st.rerun()
+    
 
 
 
@@ -737,6 +887,8 @@ if not df.empty:
 else:
     st.info("👋 歡迎！目前資料庫是空的。請在 LINE 機器人輸入第一筆帳務（例如：今天晚餐 20 加幣）後重新整理此頁面。")
     st.info("👀 Welcome! The database is currently empty. Please input your first transaction through the LINE bot (e.g., 'Spent 20 Canadian Dollars for dinner today') and refresh this page.")
+
+
 
 
 
