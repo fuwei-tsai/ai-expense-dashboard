@@ -117,6 +117,30 @@ def save_budget_to_db(currency, amount):
         st.error(f"❌ Failed to save budget 儲存預算失敗: {e}")
    
 
+def apply_morandi_table_style(styler):
+        # 1. set the base style for the entire table (light beige background with soft gray-brown text)
+        styler.set_properties(**{
+            'background-color': "#F5EEE5",  
+            'color': '#4A4643',             
+            'border-bottom': '1px solid #E8E4D9' 
+        })
+        
+        # 2. headers with a slightly darker background and bold text
+        styler.set_table_styles([
+            {
+                'selector': 'th',  
+                'props': [
+                    ('background-color', "#C4D6D9"), 
+                    ('color', '#4A4643'),            
+                    ('font-weight', 'bold'),         
+                    ('border-bottom', '1px solid #8B9DA3') 
+                ]
+            }
+        ])
+        return styler
+
+
+
 
 
 ## --- 3. conduct data reading and cleaning ---
@@ -124,6 +148,7 @@ df = load_data()
 
 if not df.empty:
     df['amount_original'] = pd.to_numeric(df['amount_original'], errors='coerce').fillna(0)
+    df['display_id'] = df['display_id'].astype(str)
 
     # --- filter currency ---
     st.markdown("### 💱 Currency Selection | 選擇顯示幣別")
@@ -206,9 +231,16 @@ if not df.empty:
            
 
     # --- 4. Data Board ---
-    expense_df = filtered_df[~filtered_df['category'].isin(['收入', '轉帳'])]
-    income_df = filtered_df[filtered_df['category'] == '收入']
-    transfer_df = filtered_df[filtered_df['category'] == '轉帳']
+    today = datetime.date.today()
+    first_day_of_month = today.replace(day=1)
+
+    # filter to current month based on transaction_date
+    filtered_df['transaction_date'] = pd.to_datetime(filtered_df['transaction_date']).dt.date
+    monthly_filtered_df = filtered_df[filtered_df['transaction_date'] >= first_day_of_month]
+
+    expense_df = monthly_filtered_df[~monthly_filtered_df['category'].isin(['收入', '轉帳'])]
+    income_df = monthly_filtered_df[monthly_filtered_df['category'] == '收入']
+    transfer_df = monthly_filtered_df[monthly_filtered_df['category'] == '轉帳']
 
    
 
@@ -236,6 +268,162 @@ if not df.empty:
 
     st.markdown("---")
 
+    # --- Duplicate Detection with Delete ---
+    st.subheader("🔍 Duplicate Transaction Check | 重複交易偵測")
+
+
+    # initial session state
+    if 'pending_delete_ids' not in st.session_state:
+        st.session_state.pending_delete_ids = []
+    if 'confirm_delete' not in st.session_state:
+        st.session_state.confirm_delete = False
+
+    def delete_transactions_by_ids(ids: list):
+        if not ids: return False
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                placeholders = ', '.join(['%s'] * len(ids))
+                sql = f"DELETE FROM test.daily_expenses WHERE display_id IN ({placeholders})"
+                cursor.execute(sql, ids)
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            st.error(f"❌ 刪除失敗 Delete failed: {e}")
+            return False
+
+    # --- auto scan ---
+    all_expense_df = df[~df['category'].isin(['收入', '轉帳', 'Income', 'Transfer'])].copy()
+
+    all_expense_df['currency'] = all_expense_df['currency'].astype(str).str.strip().str.upper()
+    all_expense_df['category'] = all_expense_df['category'].astype(str).str.strip()
+
+    display_map = {
+        "飲食": "飲食 Food", "Food": "飲食 Food",
+        "生活": "生活 Living", "Living": "生活 Living",
+        "交通": "交通 Transport", "Transport": "交通 Transport",
+        "購物": "購物 Shopping", "Shopping": "購物 Shopping",
+        "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
+        "投資": "投資 Investment", "Investment": "投資 Investment",
+        "學習": "學習 Learning", "Learning": "學習 Learning",
+    }
+    all_expense_df['category'] = all_expense_df['category'].replace(display_map)
+
+    
+    all_expense_df['date_str'] = pd.to_datetime(all_expense_df['transaction_date']).dt.strftime('%Y-%m-%d')
+    all_expense_df['amount_rounded'] = all_expense_df['amount_original'].abs().round(2)
+
+    
+    dup_subset = ['date_str', 'amount_rounded', 'currency']
+    dup_mask = all_expense_df.duplicated(subset=dup_subset, keep=False)
+    
+    dup_df = all_expense_df[dup_mask].sort_values(['date_str', 'amount_rounded', 'display_id'])
+
+    if not dup_df.empty:
+        st.warning(f"⚠️ **Detect {len(dup_df)} identical transactions!** Below is the detailed list, the system will keep the latest one (highest ID).")
+        
+        dup_df_sorted = dup_df.sort_values('display_id', ascending=False)
+        to_keep_ids = dup_df_sorted.groupby(dup_subset)['display_id'].first()  
+        to_delete_df = dup_df[~dup_df['display_id'].isin(to_keep_ids.values)].copy()
+        
+        
+        display_dup = dup_df.copy()
+        display_dup['Status 狀態'] = display_dup['display_id'].apply(
+            lambda x: '✅ 保留 Keep' if x in to_keep_ids.values else '🗑️ 待刪除 To Delete'
+        )
+        display_dup['amount_formatted'] = display_dup['amount_original'].apply(lambda x: f"{x:,.2f}")
+
+        st.dataframe(
+            display_dup[['display_id', 'date_str', 'item_description', 'category', 'amount_formatted', 'currency', 'Status 狀態']].rename(columns={
+                'display_id': 'ID',
+                'date_str': 'Date 日期',
+                'item_description': 'Item 品項',
+                'category': 'Category 類別',
+                'amount_formatted': 'Amount 金額',
+                'currency': 'Currency 幣別'
+            }).reset_index(drop=True),
+            use_container_width=True
+        )
+
+        ids_to_delete = to_delete_df['display_id'].tolist()
+
+        # delete button: first step - mark duplicates for deletion
+        if not st.session_state.confirm_delete and ids_to_delete:
+            if st.button(f"🗑️ Mark and Delete {len(ids_to_delete)} Identical Transactions | Delete {len(ids_to_delete)} Duplicates"):  
+                st.session_state.pending_delete_ids = ids_to_delete
+                st.session_state.confirm_delete = True
+                st.rerun()
+
+        # delete button: second step - confirm deletion
+        if st.session_state.confirm_delete:
+            st.warning(
+                f"⚠️ **確認刪除？ Confirm Delete?**\n\n"
+                f" About to delete **{len(st.session_state.pending_delete_ids)} 筆 transaction records**。\n\n"
+                f"此操作無法復原，請確認後再按下確認 This operation cannot be undone, please confirm before pressing confirm."
+            )
+            col_yes, col_no = st.columns([1, 5])
+            with col_yes:
+                if st.button("✅ 確認刪除 Confirm"):
+                    success = delete_transactions_by_ids(st.session_state.pending_delete_ids)
+                    if success:
+                        st.success(f"✅Successfully deleted {len(st.session_state.pending_delete_ids)} duplicate transactions!")
+                        st.session_state.pending_delete_ids = []
+                        st.session_state.confirm_delete = False
+                        st.cache_data.clear() 
+                        st.rerun()
+            with col_no:
+                if st.button("❌ 取消 Cancel"):
+                    st.session_state.pending_delete_ids = []
+                    st.session_state.confirm_delete = False
+                    st.rerun()
+
+    else:
+        st.success("✅ 目前無重複交易紀錄 No duplicate transactions detected.")
+
+    # --- manual query section ---
+    with st.expander("🔎 手動查詢特定日期 Manual Duplicate Query"):
+        query_date = st.date_input("選擇要查詢的日期 Select a date：", value=datetime.date.today(), key="dup_query_date")
+        query_date_str = query_date.strftime('%Y-%m-%d') 
+
+        day_df = all_expense_df[all_expense_df['date_str'] == query_date_str].copy()
+        
+        if day_df.empty:
+            st.info(f"📭 {query_date_str} 當天沒有任何支出紀錄。Not transactions found for this date.")
+        else:
+            day_dup_mask = day_df.duplicated(subset=dup_subset, keep=False)
+            day_dup_df = day_df[day_dup_mask].copy()
+
+            if not day_dup_df.empty:
+                st.warning(f"⚠️ {query_date_str} 當天有 **{len(day_dup_df)} 筆**重複交易! Have **{len(day_dup_df)} identical transactions**：")
+
+                day_dup_df['Status 狀態'] = day_dup_df.groupby(dup_subset)['display_id'].transform(
+                    lambda x: ['✅ 保留 Keep' if i == x.max() else '🗑️ 待刪除 To Delete' for i in x]
+                )
+                day_dup_df['amount_formatted'] = day_dup_df['amount_original'].apply(lambda x: f"{x:,.2f}")
+
+                st.dataframe(
+                    day_dup_df[['display_id', 'date_str', 'item_description', 'category', 'amount_formatted', 'currency', 'Status 狀態']].rename(columns={
+                        'display_id': 'ID',
+                        'date_str': 'Date 日期',
+                        'item_description': 'Item 品項',
+                        'category': 'Category 類別',
+                        'amount_formatted': 'Amount 金額',
+                        'currency': 'Currency 幣別'
+                    }).reset_index(drop=True),
+                    use_container_width=True
+                )
+
+                manual_ids_to_delete = day_dup_df[day_dup_df['Status 狀態'] == '🗑️ 待刪除 To Delete']['display_id'].tolist()
+
+                if manual_ids_to_delete and st.button(f"🗑️ 刪除此日期的重複交易 {len(manual_ids_to_delete)} 筆 Delete {len(manual_ids_to_delete)} Duplicates!", key="manual_delete_btn"):
+                    st.session_state.pending_delete_ids = manual_ids_to_delete
+                    st.session_state.confirm_delete = True
+                    st.rerun()
+            else:
+                st.success(f"✅ {query_date_str} 當天無重複交易 No duplicate transactions detected for this date.")
+
+
 
 
     # prediction and insights section
@@ -246,24 +434,24 @@ if not df.empty:
     _, days_in_month = calendar.monthrange(today.year, today.month)
     days_passed = today.day
 
-   
+    
 
     if days_passed > 0 and total_exp > 0:
         daily_run_rate = total_exp / days_passed
         projected_total = daily_run_rate * days_in_month
         target_daily_rate = monthly_budget / days_in_month
 
-       
+        
 
         p_col1, p_col2 = st.columns(2) 
         with p_col1:
             st.info(f"📈 **Current Run Rate | 目前日均花費:**\n\n{daily_run_rate:,.2f} {selected_currency} / Day\n\n*(Target | 每日目標: {target_daily_rate:,.2f})*")
         with p_col2:
             st.warning(f"🎯 **Projected Total | 本月預估總花費:**\n\n{projected_total:,.2f} {selected_currency}\n\n*(Budget | 總預算: {monthly_budget:,.2f})*")
-        
+            
         projected_balance = monthly_budget - projected_total
         st.markdown(f"#### 🎯 Budget Achievement | 預算達成率分析 (Target: {monthly_budget:,.0f} {selected_currency})")
-        
+            
         if projected_total > monthly_budget:
             overspend_amt = projected_total - monthly_budget
             st.error(f"🚨 **警告 WARNING:** At the current burn rate, you will **overspend by {overspend_amt:,.2f} {selected_currency}**!\n\n💡 建議檢視近日的高額開銷。")
@@ -271,7 +459,7 @@ if not df.empty:
             st.warning(f"⚠️ **注意 CAUTION:** Projected spending has reached the 80% budget threshold!")
         else:
             st.success(f"✅ **安全 SAFE:** Good pacing! Projected month-end balance is **{projected_balance:,.2f} {selected_currency}**.")
-            
+                
         current_spend_ratio = min(total_exp / monthly_budget, 1.0) if monthly_budget > 0 else 0.0
         st.write(f"Budget Consumed | 目前已消耗預算：**{current_spend_ratio * 100:.1f}%**")
         st.progress(current_spend_ratio)
@@ -279,7 +467,7 @@ if not df.empty:
     else:
         st.info("💡 Unlock AI prediction features by accumulating more of this month's spending 累積更多本月支出後，即可解鎖 AI 預測功能")
 
-   
+    
 
     st.markdown("---")
 
@@ -395,27 +583,6 @@ if not df.empty:
     styled_df = df[['display_id', 'transaction_date', 'item_description', 'category', 'amount_original', 'currency']].copy()
     styled_df.columns = ['ID 編號', 'Date 日期', 'Item 品項', 'Category 分類', 'Amount 金額', 'Currency 幣別']
 
-    
-    display_map = {
-        "飲食": "飲食 Food", "Food": "飲食 Food",
-        "生活": "生活 Living", "Living": "生活 Living",
-        "交通": "交通 Transport", "Transport": "交通 Transport",
-        "購物": "購物 Shopping", "Shopping": "購物 Shopping",
-        "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
-        "投資": "投資 Investment", "Investment": "投資 Investment",
-        "學習": "學習 Learning", "Learning": "學習 Learning",
-        "收入": "收入 Income", "Income": "收入 Income",
-        "轉帳": "轉帳 Transfer", "Transfer": "轉帳 Transfer"
-    }
-    styled_df['Category 分類'] = styled_df['Category 分類'].replace(display_map)
-
-    
-    styled_df['Amount 金額'] = pd.to_numeric(styled_df['Amount 金額'], errors='coerce').fillna(0)
-
-    
-    styled_df['Date 日期'] = pd.to_datetime(styled_df['Date 日期']).dt.date
-
-
 
     # Date Filter
     col_filter, _ = st.columns([1, 1])
@@ -459,35 +626,118 @@ if not df.empty:
         )
 
     
-    def apply_morandi_table_style(styler):
-        # 1. set the base style for the entire table (light beige background with soft gray-brown text)
-        styler.set_properties(**{
-            'background-color': "#F5EEE5",  
-            'color': '#4A4643',             
-            'border-bottom': '1px solid #E8E4D9' 
-        })
-        
-        # 2. headers with a slightly darker background and bold text
-        styler.set_table_styles([
-            {
-                'selector': 'th',  
-                'props': [
-                    ('background-color', "#C4D6D9"), 
-                    ('color', '#4A4643'),            
-                    ('font-weight', 'bold'),         
-                    ('border-bottom', '1px solid #8B9DA3') 
-                ]
-            }
-        ])
-        return styler
-
+    
     
 
     st.table(styled_df.style.pipe(apply_morandi_table_style).hide(axis="index"))
 
 
+
+
+
+
+   
+    # --- 7. All Transaction History ---
+    with st.expander("🗂️ 查看所有月份紀錄 View All History"):
+
+        summary_df = df.copy()
+        summary_df['transaction_date'] = pd.to_datetime(summary_df['transaction_date'])
+        summary_df['year_month'] = summary_df['transaction_date'].dt.to_period('M')
+        summary_df['amount_original'] = pd.to_numeric(summary_df['amount_original'], errors='coerce').fillna(0)
+
+       
+        summary_df['amount_twd'] = summary_df.apply(
+            lambda row: row['amount_original'] * EXCHANGE_RATES.get(row['currency'], 1.0), axis=1
+        )
+
+        # TWD summary by month and category
+        monthly_exp = summary_df[~summary_df['category'].isin(['收入', '轉帳'])].groupby('year_month')['amount_twd'].sum().rename('總支出_TWD')
+        monthly_inc = summary_df[summary_df['category'] == '收入'].groupby('year_month')['amount_twd'].sum().rename('總收入_TWD')
+        monthly_tra = summary_df[summary_df['category'] == '轉帳'].groupby('year_month')['amount_twd'].sum().rename('換匯流動_TWD')
+
+        # each currency's net flow by month (income - expense + transfer)
+        currency_series_list = []
+        currency_col_names = []
+        for curr in EXCHANGE_RATES.keys():
+            curr_df = summary_df[summary_df['currency'] == curr]
+            if curr_df['amount_original'].abs().sum() == 0:
+                continue
+            exp = curr_df[~curr_df['category'].isin(['收入', '轉帳'])].groupby('year_month')['amount_original'].sum()
+            inc = curr_df[curr_df['category'] == '收入'].groupby('year_month')['amount_original'].sum()
+            tra = curr_df[curr_df['category'] == '轉帳'].groupby('year_month')['amount_original'].sum()
+            net = inc.subtract(exp, fill_value=0).add(tra, fill_value=0)
+            if net.abs().sum() > 0:
+                currency_series_list.append(net)
+                currency_col_names.append(f'Net {curr}')
+
+        
+        base = pd.concat([monthly_exp, monthly_inc, monthly_tra], axis=1).fillna(0)
+        base.columns = ['Total Expense 總支出_TWD', 'Total Income 總收入_TWD', 'Transfer 換匯流動_TWD']
+        base['Net Flow 月淨流向_TWD'] = base['Total Income 總收入_TWD'] - base['Total Expense 總支出_TWD'] + base['Transfer 換匯流動_TWD']
+
+        for i, s in enumerate(currency_series_list):
+            base[currency_col_names[i]] = s
+
+        monthly_summary = base.fillna(0).sort_index(ascending=False).reset_index()
+        monthly_summary['year_month'] = monthly_summary['year_month'].astype(str)
+
+        monthly_summary.rename(columns={
+            'year_month': 'Month 月份',
+            '總支出_TWD': 'Total Expense 總支出 (TWD)',
+            '總收入_TWD': 'Total Income 總收入 (TWD)',
+            '換匯流動_TWD': 'Transfer 換匯流動 (TWD)',
+            '月淨流向_TWD': 'Net Flow 月淨流向 (TWD)',
+        }, inplace=True)
+
+        
+        for col in monthly_summary.columns:
+            if col == 'Month 月份':
+                continue
+            vals = monthly_summary[col]
+            if isinstance(vals, pd.DataFrame):
+                monthly_summary[col] = vals.iloc[:, 0]
+            monthly_summary[col] = pd.to_numeric(monthly_summary[col], errors='coerce').fillna(0)
+            if 'TWD' in col:
+                monthly_summary[col] = monthly_summary[col].apply(lambda x: f"{x:,.0f}")
+            else:
+                monthly_summary[col] = monthly_summary[col].apply(lambda x: f"{x:,.2f}")
+
+        
+
+        st.caption(f"共 {len(monthly_summary)} 個月份紀錄 | {len(monthly_summary)} months　　💡 Net XXX 欄位為各幣別收入減支出加換匯的原幣淨值，TWD 欄位為換算後總計")
+        st.caption(f"共 {len(monthly_summary)} 個月份紀錄 | {len(monthly_summary)} months　　💡 Net XXX means the net flow of each currency by month (income - expense + transfer)")
+        st.table(monthly_summary.style.pipe(apply_morandi_table_style).hide(axis="index"))
+
+
+
+    display_map = {
+        "飲食": "飲食 Food", "Food": "飲食 Food",
+        "生活": "生活 Living", "Living": "生活 Living",
+        "交通": "交通 Transport", "Transport": "交通 Transport",
+        "購物": "購物 Shopping", "Shopping": "購物 Shopping",
+        "娛樂": "娛樂 Entertainment", "Entertainment": "娛樂 Entertainment",
+        "投資": "投資 Investment", "Investment": "投資 Investment",
+        "學習": "學習 Learning", "Learning": "學習 Learning",
+        "收入": "收入 Income", "Income": "收入 Income",
+        "轉帳": "轉帳 Transfer", "Transfer": "轉帳 Transfer"
+    }
+    styled_df['Category 分類'] = styled_df['Category 分類'].replace(display_map)
+
+    
+    styled_df['Amount 金額'] = pd.to_numeric(styled_df['Amount 金額'], errors='coerce').fillna(0)
+
+    
+    styled_df['Date 日期'] = pd.to_datetime(styled_df['Date 日期']).dt.date
+
+
+
+    
+
+
 else:
     st.info("👋 歡迎！目前資料庫是空的。請在 LINE 機器人輸入第一筆帳務（例如：今天晚餐 20 加幣）後重新整理此頁面。")
     st.info("👀 Welcome! The database is currently empty. Please input your first transaction through the LINE bot (e.g., 'Spent 20 Canadian Dollars for dinner today') and refresh this page.")
+
+
 
 
