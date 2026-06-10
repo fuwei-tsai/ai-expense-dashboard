@@ -234,15 +234,19 @@ if not df.empty:
     today = datetime.date.today()
     first_day_of_month = today.replace(day=1)
 
+    _, last_day = calendar.monthrange(today.year, today.month)
+    last_day_of_month = today.replace(day=last_day)
+
     # filter to current month based on transaction_date
     filtered_df['transaction_date'] = pd.to_datetime(filtered_df['transaction_date']).dt.date
-    monthly_filtered_df = filtered_df[filtered_df['transaction_date'] >= first_day_of_month]
+    monthly_filtered_df = filtered_df[
+        (filtered_df['transaction_date'] >= first_day_of_month) & 
+        (filtered_df['transaction_date'] <= last_day_of_month)
+    ]
 
     expense_df = monthly_filtered_df[~monthly_filtered_df['category'].isin(['收入', '轉帳'])]
     income_df = monthly_filtered_df[monthly_filtered_df['category'] == '收入']
     transfer_df = monthly_filtered_df[monthly_filtered_df['category'] == '轉帳']
-
-   
 
     total_exp = expense_df['amount_original'].sum()
     total_inc = income_df['amount_original'].sum()
@@ -250,21 +254,15 @@ if not df.empty:
     net_income = total_inc - total_exp + transfer_net
 
 
-
     col1, col2, col3, col4 = st.columns(4)
-
     with col1: 
         st.metric(f"Total Expense | 總支出 ({display_currency_symbol})", f"{total_exp:,.2f}", delta_color="inverse")
-
     with col2:
         st.metric(f"Total Income | 總收入 ({display_currency_symbol})", f"{total_inc:,.2f}")
-
     with col3:
         st.metric(f"Transfer Flow | 換匯流動 ({display_currency_symbol})", f"{transfer_net:,.2f}", delta_color="normal")
-
     with col4:
         st.metric(f"Net Cash Flow | 本月淨流向 ({display_currency_symbol})", f"{net_income:,.2f}", delta=f"{net_income:,.2f}")
-
 
     st.markdown("---")
 
@@ -434,14 +432,10 @@ if not df.empty:
     _, days_in_month = calendar.monthrange(today.year, today.month)
     days_passed = today.day
 
-    
-
     if days_passed > 0 and total_exp > 0:
         daily_run_rate = total_exp / days_passed
         projected_total = daily_run_rate * days_in_month
         target_daily_rate = monthly_budget / days_in_month
-
-        
 
         p_col1, p_col2 = st.columns(2) 
         with p_col1:
@@ -454,7 +448,7 @@ if not df.empty:
             
         if projected_total > monthly_budget:
             overspend_amt = projected_total - monthly_budget
-            st.error(f"🚨 **警告 WARNING:** At the current burn rate, you will **overspend by {overspend_amt:,.2f} {selected_currency}**!\n\n💡 建議檢視近日的高額開銷。")
+            st.error(f"🚨 **警告 WARNING:** At the current burn rate, you will **overspend by {overspend_amt:,.2f} {selected_currency}**!\n\n💡 建議檢視近日的高額開銷 (如房租等一次性大筆支出會影響初期預測)。")
         elif projected_total > (monthly_budget * 0.8):
             st.warning(f"⚠️ **注意 CAUTION:** Projected spending has reached the 80% budget threshold!")
         else:
@@ -466,8 +460,6 @@ if not df.empty:
 
     else:
         st.info("💡 Unlock AI prediction features by accumulating more of this month's spending 累積更多本月支出後，即可解鎖 AI 預測功能")
-
-    
 
     st.markdown("---")
 
@@ -887,7 +879,6 @@ if not df.empty:
 else:
     st.info("👋 歡迎！目前資料庫是空的。請在 LINE 機器人輸入第一筆帳務（例如：今天晚餐 20 加幣）後重新整理此頁面。")
     st.info("👀 Welcome! The database is currently empty. Please input your first transaction through the LINE bot (e.g., 'Spent 20 Canadian Dollars for dinner today') and refresh this page.")
-
 
 
 
